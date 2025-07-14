@@ -10,7 +10,6 @@ I use it for mass conversion of my project files (mostly Vite and React.js). Ins
 - Automatically backs up original files to .webpcon_backup
 - Revert feature: restores original files and deletes WebP files
 - Supports Windows & Linux (cross-platform)
-- Fast process, without external C libraries
 
 ## Installation
 
