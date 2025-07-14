@@ -12,6 +12,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"image/draw"
+
+	"github.com/HugoSmits86/nativewebp"
 	"github.com/chai2010/webp"
 	"golang.org/x/image/bmp"
 	"golang.org/x/image/tiff"
@@ -22,7 +25,7 @@ var imageExt = map[string]bool{
 	".jpeg": true,
 	".png":  true,
 	".bmp":  true,
-	".gif":  true, // Will be converted into static image
+	".gif":  true, // Will be converted into static image. gif conversion still in experiment
 	".tiff": true,
 }
 
@@ -30,6 +33,7 @@ var skipDirs = map[string]bool{
 	"node_modules":    true,
 	".git":            true,
 	".webpcon_backup": true,
+	".webcon_cache":   true,
 	"dist":            true,
 	// Add another excluded folder if available
 }
@@ -46,8 +50,8 @@ func main() {
 	args := os.Args[1:]
 	if len(args) == 0 {
 		fmt.Println("Usage:")
-		fmt.Println("  webpcon <project-path>	# Convert to WebP")
-		fmt.Println("  webpcon <project-path> revert	# Revert to original")
+		fmt.Println("  webpcon <project-path>\t# Convert to WebP")
+		fmt.Println("  webpcon <project-path> revert\t# Revert to original")
 		return
 	}
 
@@ -55,6 +59,13 @@ func main() {
 	if !isSafePath(path) {
 		fmt.Println("⚠️  Path is too broad or suspicious. Operation cancelled.")
 		return
+	}
+
+	enableGif := false
+	for _, arg := range args {
+		if arg == "--enable-gif" || arg == "--gif" {
+			enableGif = true
+		}
 	}
 
 	if len(args) > 1 && args[1] == "revert" {
@@ -65,7 +76,7 @@ func main() {
 		return
 	}
 
-	err := convertImages(path)
+	err := convertImages(path, enableGif)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -82,7 +93,7 @@ func isSafePath(path string) bool {
 		return confirm()
 	}
 
-	projectFiles := []string{"package.json", "vite.config.ts", "index.html"}
+	projectFiles := []string{"package.json", "vite.config.ts", "vite.config.js", "next.config.js", "tsconfig.json", "vue.config.js", "nuxt.config.ts", "nuxt.config.js", "tsconfig.json", "jsconfig.json", "babel.config.js", "postcss.config.js", "tailwind.config.js", "angular.json", "svelte.config.js", "index.html"} // Add another if you want
 	found := false
 	for _, f := range projectFiles {
 		if _, err := os.Stat(filepath.Join(abs, f)); err == nil {
@@ -127,7 +138,7 @@ func copyFile(src, dst string) error {
 	return err
 }
 
-func convertImages(root string) error {
+func convertImages(root string, enableGif bool) error {
 	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
@@ -164,14 +175,12 @@ func convertImages(root string) error {
 			return err
 		}
 
-		// Move the original file to backup
 		if err := os.Rename(path, bakPath); err != nil {
 			fmt.Printf("❌ Error moving %s to backup: %v\n", path, err)
 			return err
 		}
 		fmt.Printf("💾 Moved to backup: %s\n", relPath)
 
-		// Open the backup file for conversion
 		in, err := os.Open(bakPath)
 		if err != nil {
 			fmt.Printf("❌ Error opening backup file %s: %v\n", bakPath, err)
@@ -180,6 +189,7 @@ func convertImages(root string) error {
 		defer in.Close()
 
 		var img image.Image
+		var gifFrames *gif.GIF
 		switch ext {
 		case ".jpg", ".jpeg":
 			img, err = jpeg.Decode(in)
@@ -188,7 +198,57 @@ func convertImages(root string) error {
 		case ".bmp":
 			img, err = bmp.Decode(in)
 		case ".gif":
-			img, err = gif.Decode(in)
+			if enableGif {
+				gifFrames, err = gif.DecodeAll(in)
+				if err == nil && len(gifFrames.Image) > 1 {
+					cacheDir := filepath.Join(root, ".webcon_cache")
+					if err := gifExtractor(bakPath, cacheDir); err != nil {
+						fmt.Printf("❌ Error extracting GIF frame: %v\n", err)
+						return err
+					}
+					for i := range gifFrames.Image {
+						pngPath := filepath.Join(cacheDir, fmt.Sprintf("frame_%02d.png", i))
+						webpPath := filepath.Join(cacheDir, fmt.Sprintf("frame_%02d.webp", i))
+						err := frameCompress(pngPath, webpPath, 60)
+						if err != nil {
+							fmt.Printf("❌ Error compressing frame to WebP (frame %d): %v\n", i, err)
+							return err
+						}
+					}
+					webpPath := path[:len(path)-len(ext)] + ".webp"
+					err := buildAnimatedWebp(
+						cacheDir,
+						webpPath,
+						func() []uint {
+							d := make([]uint, len(gifFrames.Delay))
+							for i, v := range gifFrames.Delay {
+								d[i] = uint(v) * 10
+							}
+							return d
+						}(),
+						func() []uint {
+							d := make([]uint, len(gifFrames.Disposal))
+							for i, v := range gifFrames.Disposal {
+								d[i] = uint(v)
+							}
+							return d
+						}(),
+						uint16(gifFrames.LoopCount),
+						0xffffffff,
+					)
+					if err != nil {
+						fmt.Printf("❌ Error build animated WebP: %v\n", err)
+						return err
+					}
+					deleteCache(cacheDir)
+					fmt.Printf("✅ Converted (experimental): %s -> %s\n", relPath, filepath.Base(webpPath))
+					return nil
+				} else {
+					img, err = gif.Decode(in)
+				}
+			} else {
+				img, err = gif.Decode(in)
+			}
 		case ".tiff":
 			img, err = tiff.Decode(in)
 		default:
@@ -240,7 +300,6 @@ func revertImages(root string) error {
 		origPath := filepath.Join(root, relPath)
 		webpPath := origPath[:len(origPath)-len(ext)] + ".webp"
 
-		// Check if the .webp file exists
 		if _, err := os.Stat(webpPath); err == nil {
 			if err := os.Remove(webpPath); err != nil {
 				fmt.Printf("❌ Failed to delete %s: %v\n", webpPath, err)
@@ -249,7 +308,6 @@ func revertImages(root string) error {
 			fmt.Printf("🗑️  Deleted: %s\n", webpPath)
 		}
 
-		// Restore the backup file to its original location
 		origDir := filepath.Dir(origPath)
 		if err := os.MkdirAll(origDir, 0755); err != nil {
 			fmt.Printf("❌ Error creating directory %s: %v\n", origDir, err)
@@ -262,4 +320,91 @@ func revertImages(root string) error {
 		fmt.Printf("✅ Restored: %s\n", relPath)
 		return nil
 	})
+}
+
+// Helpers
+func gifExtractor(gifPath, cacheDir string) error {
+	f, err := os.Open(gifPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	gifFrames, err := gif.DecodeAll(f)
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return err
+	}
+
+	for i, frame := range gifFrames.Image {
+		rgba := image.NewRGBA(frame.Bounds())
+		draw.Draw(rgba, frame.Bounds(), frame, image.Point{}, draw.Over)
+		framePath := filepath.Join(cacheDir, fmt.Sprintf("frame_%02d.png", i))
+		out, err := os.Create(framePath)
+		if err != nil {
+			return err
+		}
+		err = png.Encode(out, rgba)
+		out.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func frameCompress(pngPath, webpPath string, quality float32) error {
+	f, err := os.Open(pngPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	img, err := png.Decode(f)
+	if err != nil {
+		return err
+	}
+	out, err := os.Create(webpPath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	return webp.Encode(out, img, &webp.Options{Quality: quality})
+}
+
+func buildAnimatedWebp(framesDir, outPath string, durations []uint, disposals []uint, loopCount uint16, bgColor uint32) error {
+	frameCount := len(durations)
+	var images []image.Image
+	for i := 0; i < frameCount; i++ {
+		webpPath := filepath.Join(framesDir, fmt.Sprintf("frame_%02d.webp", i))
+		f, err := os.Open(webpPath)
+		if err != nil {
+			return err
+		}
+		img, err := webp.Decode(f)
+		f.Close()
+		if err != nil {
+			return err
+		}
+		images = append(images, img)
+	}
+	ani := nativewebp.Animation{
+		Images:          images,
+		Durations:       durations,
+		Disposals:       disposals,
+		LoopCount:       loopCount,
+		BackgroundColor: bgColor,
+	}
+	out, err := os.Create(outPath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	return nativewebp.EncodeAll(out, &ani, nil)
+}
+
+func deleteCache(cacheDir string) error {
+	return os.RemoveAll(cacheDir)
 }

@@ -14,6 +14,8 @@ I use it for mass conversion of my project files (mostly Vite and React.js). Ins
 
 ## Installation
 
+Make sure to install GCC (MinGW) or similar before building!
+
 ### Windows
 
 ```
@@ -50,4 +52,4 @@ webcon <project-folder> revert
 
 ## Known Issue
 
-For the `.gif` format, it will be converted to a static image on the first frame (limitation of go-native library).
+For the `.gif` format, it will be converted to a static image on the first frame. If you wish to convert it to an animated WebP anyway, use `--gif`, but I would not recommend it due to the limitations of the go-native library.
