@@ -1,4 +1,4 @@
-module RedStoneCraftGG/webpcon
+module redstonecraftgg/webpcon
 
 go 1.23.4
 
